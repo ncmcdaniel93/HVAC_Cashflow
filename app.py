@@ -82,12 +82,12 @@ with st.sidebar:
     truck_financed_pct = pct_input("Truck Financed Pct", "truck_financed_pct", "Financed portion of truck purchase.")
 
     st.subheader("Overhead")
-    office_payroll_monthly = st.number_input("Office Payroll Monthly", min_value=0.0, value=DEFAULTS["office_payroll_monthly"])
-    rent_monthly = st.number_input("Rent Monthly", min_value=0.0, value=DEFAULTS["rent_monthly"])
-    utilities_monthly = st.number_input("Utilities Monthly", min_value=0.0, value=DEFAULTS["utilities_monthly"])
-    insurance_monthly = st.number_input("Insurance Monthly", min_value=0.0, value=DEFAULTS["insurance_monthly"])
-    software_monthly = st.number_input("Software Monthly", min_value=0.0, value=DEFAULTS["software_monthly"])
-    other_fixed_monthly = st.number_input("Other Fixed Monthly", min_value=0.0, value=DEFAULTS["other_fixed_monthly"])
+    office_payroll_monthly = st.number_input("Office Payroll Monthly", min_value=0.0, value=DEFAULTS["office_payroll_monthly"], help="Monthly non-technician payroll.")
+    rent_monthly = st.number_input("Rent Monthly", min_value=0.0, value=DEFAULTS["rent_monthly"], help="Facility rent expense per month.")
+    utilities_monthly = st.number_input("Utilities Monthly", min_value=0.0, value=DEFAULTS["utilities_monthly"], help="Utilities expense per month.")
+    insurance_monthly = st.number_input("Insurance Monthly", min_value=0.0, value=DEFAULTS["insurance_monthly"], help="Business insurance expense per month.")
+    software_monthly = st.number_input("Software Monthly", min_value=0.0, value=DEFAULTS["software_monthly"], help="Software subscription expense per month.")
+    other_fixed_monthly = st.number_input("Other Fixed Monthly", min_value=0.0, value=DEFAULTS["other_fixed_monthly"], help="Other fixed monthly overhead.")
 
     st.subheader("Working Capital")
     ar_days = st.number_input("AR Days", min_value=0.0, value=DEFAULTS["ar_days"], help="Average days sales outstanding.")
@@ -96,8 +96,8 @@ with st.sidebar:
     starting_cash = st.number_input("Starting Cash", min_value=0.0, value=DEFAULTS["starting_cash"], help="Beginning cash balance in month 1.")
 
     st.subheader("Debt")
-    enable_term_loan = st.checkbox("Enable Term Loan", value=DEFAULTS["enable_term_loan"])
-    loan_principal = st.number_input("Loan Principal", min_value=0.0, value=DEFAULTS["loan_principal"])
+    enable_term_loan = st.checkbox("Enable Term Loan", value=DEFAULTS["enable_term_loan"], help="Toggle amortizing term-loan payments.")
+    loan_principal = st.number_input("Loan Principal", min_value=0.0, value=DEFAULTS["loan_principal"], help="Starting term-loan balance.")
     loan_annual_rate = pct_input("Loan Annual Rate", "loan_annual_rate", "Annual term loan interest rate.")
     loan_term_months = st.number_input("Loan Term Months", min_value=1, value=DEFAULTS["loan_term_months"])
     enable_loc = st.checkbox("Enable LOC", value=DEFAULTS["enable_loc"], help="LOC means line of credit.")
@@ -107,7 +107,7 @@ with st.sidebar:
     loc_repay_buffer = st.number_input("LOC Repay Buffer", min_value=0.0, value=DEFAULTS["loc_repay_buffer"])
 
     st.subheader("Distributions")
-    enable_distributions = st.checkbox("Enable Distributions", value=DEFAULTS["enable_distributions"])
+    enable_distributions = st.checkbox("Enable Distributions", value=DEFAULTS["enable_distributions"], help="Toggle owner distributions.")
     distributions_pct_of_ebitda = pct_input("Distributions Pct of EBITDA", "distributions_pct_of_ebitda", "Share of positive EBITDA distributed to owners.")
     distributions_only_if_cash_above = st.number_input("Distributions Only if Cash Above", min_value=0.0, value=DEFAULTS["distributions_only_if_cash_above"])
 
@@ -126,6 +126,26 @@ df.attrs["ap_days"] = inputs["ap_days"]
 df.attrs["inventory_days"] = inputs["inventory_days"]
 
 metrics = compute_metrics(df, horizon_months)
+annual_kpis = (
+    metrics["revenue_by_year"]
+    .merge(metrics["ebitda_by_year"], on="Year")
+    .merge(metrics["fcf_by_year"], on="Year")
+)
+annual_kpis["EBITDA Margin %"] = 100 * annual_kpis["EBITDA"] / annual_kpis["Total Revenue"].replace(0, pd.NA)
+annual_kpis["DSCR"] = metrics["dscr_by_year"].reset_index(drop=True)
+annual_kpis["Revenue per Tech"] = metrics["revenue_per_tech_by_year"].reset_index(drop=True)
+annual_kpis["Revenue per Truck"] = metrics["revenue_per_truck_by_year"].reset_index(drop=True)
+annual_kpis = annual_kpis.round(
+    {
+        "Total Revenue": 0,
+        "EBITDA": 0,
+        "Free Cash Flow": 0,
+        "EBITDA Margin %": 2,
+        "DSCR": 2,
+        "Revenue per Tech": 0,
+        "Revenue per Truck": 0,
+    }
+)
 
 chart_filter = st.selectbox("Chart View", ["Full horizon", "Year 1 only", "Last 12 months", "Rolling 24 months"]) 
 if chart_filter == "Year 1 only":
@@ -146,16 +166,27 @@ summary_tab, cashflow_tab, drivers_tab, sens_tab = st.tabs([
 
 with summary_tab:
     st.subheader("Headline KPIs")
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
     c1.metric("Total Revenue", f"${df['Total Revenue'].sum():,.0f}")
     c2.metric("Total EBITDA", f"${df['EBITDA'].sum():,.0f}")
     c3.metric("Total Free Cash Flow", f"${df['Free Cash Flow'].sum():,.0f}")
     c4.metric("Minimum Ending Cash", f"${metrics['minimum_ending_cash']:,.0f}", metrics["minimum_ending_cash_month"])
+    c5.metric("Negative Cash Months", f"{metrics['negative_cash_months']}")
+    c6.metric("Avg Gross Margin", f"{100 * metrics['gross_margin_full_period_avg']:.1f}%")
+
+    c7, c8, c9 = st.columns(3)
+    c7.metric("Cash Conversion Cycle", f"{metrics['ccc']:.1f} days")
+    c8.metric("CAC", f"${metrics['cac']:,.2f}")
+    c9.metric("Break-even Revenue", f"${metrics['break_even_revenue']:,.0f}")
+
+    if metrics["revenue_cagr"] is not None and metrics["ebitda_cagr"] is not None:
+        c10, c11 = st.columns(2)
+        c10.metric("Revenue CAGR", f"{100 * metrics['revenue_cagr']:.2f}%")
+        c11.metric("EBITDA CAGR", f"{100 * metrics['ebitda_cagr']:.2f}%")
 
     st.write("EBITDA means Earnings Before Interest, Taxes, Depreciation, and Amortization.")
-    st.write(f"Cash Conversion Cycle: {metrics['ccc']:.1f} days")
-    st.write(f"CAC (Customer Acquisition Cost): ${metrics['cac']:,.2f}")
-    st.write(f"Break-even revenue: ${metrics['break_even_revenue']:,.0f}")
+    st.subheader("Annual KPIs")
+    st.dataframe(annual_kpis, use_container_width=True)
 
     seg = chart_df[["Date", "Service Revenue", "Replacement Revenue", "Maintenance Revenue"]].melt("Date", var_name="Segment", value_name="Revenue")
     st.plotly_chart(px.area(seg, x="Date", y="Revenue", color="Segment", title="Revenue by Segment"), use_container_width=True)
@@ -179,19 +210,98 @@ with cashflow_tab:
     st.write("Operating Cash Flow equals EBITDA minus change in net working capital.")
     st.write("Free Cash Flow equals Operating Cash Flow minus capex.")
     st.write("Net Cash Flow equals Operating Cash Flow minus capex plus net financing cash flow.")
+
+    selected_month = st.selectbox("Select Month for Cash Flow Bridge", options=df["Year_Month_Label"].tolist(), index=len(df) - 1)
+    row = df.loc[df["Year_Month_Label"] == selected_month].iloc[0]
+    grouped_subtotals = pd.DataFrame(
+        [
+            {"Section": "A Operating", "Line Item": "EBITDA", "Amount": row["EBITDA"]},
+            {"Section": "A Operating", "Line Item": "- Change in NWC", "Amount": -row["Change in NWC"]},
+            {"Section": "A Operating", "Line Item": "Operating Cash Flow", "Amount": row["Operating Cash Flow"]},
+            {"Section": "B Investing", "Line Item": "- Capex", "Amount": -row["Capex"]},
+            {"Section": "B Investing", "Line Item": "Free Cash Flow", "Amount": row["Free Cash Flow"]},
+            {"Section": "C Financing", "Line Item": "- Term Loan Payment", "Amount": -row["Term Loan Payment"]},
+            {"Section": "C Financing", "Line Item": "- LOC Interest", "Amount": -row["LOC Interest"]},
+            {"Section": "C Financing", "Line Item": "+ LOC Draw", "Amount": row["LOC Draw"]},
+            {"Section": "C Financing", "Line Item": "- LOC Repay", "Amount": -row["LOC Repay"]},
+            {"Section": "C Financing", "Line Item": "- Owner Distributions", "Amount": -row["Owner Distributions"]},
+            {"Section": "Total", "Line Item": "Net Cash Flow", "Amount": row["Net Cash Flow"]},
+        ]
+    )
+    st.caption("Grouped cash flow subtotals for the selected month.")
+    st.dataframe(grouped_subtotals, use_container_width=True)
+
+    waterfall = go.Figure(
+        go.Waterfall(
+            name="Cash Flow Bridge",
+            orientation="v",
+            measure=[
+                "absolute",
+                "relative",
+                "total",
+                "relative",
+                "total",
+                "relative",
+                "total",
+                "relative",
+                "relative",
+                "relative",
+                "relative",
+                "relative",
+                "relative",
+                "total",
+            ],
+            x=[
+                "Total Revenue",
+                "Total Direct Costs",
+                "Gross Profit",
+                "Total OPEX",
+                "EBITDA",
+                "Change in NWC",
+                "Operating Cash Flow",
+                "Capex",
+                "Term Loan Payment",
+                "LOC Interest",
+                "LOC Draw",
+                "LOC Repay",
+                "Owner Distributions",
+                "Net Cash Flow",
+            ],
+            y=[
+                row["Total Revenue"],
+                -row["Total Direct Costs"],
+                0,
+                -row["Total OPEX"],
+                0,
+                -row["Change in NWC"],
+                0,
+                -row["Capex"],
+                -row["Term Loan Payment"],
+                -row["LOC Interest"],
+                row["LOC Draw"],
+                -row["LOC Repay"],
+                -row["Owner Distributions"],
+                0,
+            ],
+            connector={"line": {"color": "rgb(120,120,120)"}},
+        )
+    )
+    waterfall.update_layout(title=f"Monthly Cash Flow Bridge ({selected_month})", showlegend=False)
+    st.plotly_chart(waterfall, use_container_width=True)
+
     st.dataframe(df, use_container_width=True)
     st.download_button("Download CSV", df.to_csv(index=False), file_name="hvac_cashflow_monthly.csv", mime="text/csv")
 
 with drivers_tab:
     st.subheader("Key drivers over time")
-    drv = df[["Date", "Techs", "Calls", "Replacement Leads", "Service Revenue", "Replacement Revenue", "Maintenance Revenue"]]
-    st.plotly_chart(px.line(drv, x="Date", y=["Techs", "Calls", "Replacement Leads"], title="Ops Drivers"), use_container_width=True)
+    drv = df[["Date", "Techs", "Trucks", "Calls", "Replacement Leads", "Service Revenue", "Replacement Revenue", "Maintenance Revenue"]]
+    st.plotly_chart(px.line(drv, x="Date", y=["Techs", "Trucks", "Calls", "Replacement Leads"], title="Ops Drivers"), use_container_width=True)
     st.plotly_chart(px.line(drv, x="Date", y=["Service Revenue", "Replacement Revenue", "Maintenance Revenue"], title="Revenue Drivers"), use_container_width=True)
 
 with sens_tab:
     st.subheader("One-way sensitivity")
     sens_df, target_year = run_one_way_sensitivity(inputs, sensitivity_delta)
-    default_target = "Year N EBITDA" if horizon_months >= 60 else "Year N EBITDA"
+    default_target = "Year N EBITDA"
     target = st.selectbox("Target metric", TARGET_OPTIONS, index=TARGET_OPTIONS.index(default_target))
 
     tornado = sens_df.pivot(index="Driver", columns="Case", values=f"Delta {target}").fillna(0)

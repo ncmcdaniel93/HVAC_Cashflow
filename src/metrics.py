@@ -21,8 +21,11 @@ def compute_metrics(df: pd.DataFrame, horizon_months: int) -> dict:
     ebitda_margin = by_year.apply(lambda r: _safe_div(r["EBITDA"], r["Total Revenue"]), axis=1)
     gross_margin = by_year.apply(lambda r: _safe_div(r["Gross Profit"], r["Total Revenue"]), axis=1)
 
-    tech_avg_year = df.groupby("Year")["Techs"].mean()
-    truck_avg_year = df.groupby("Year")["Techs"].mean()  # trucks_per_tech often 1.0, proxy in output table
+    tech_avg_year = df.groupby("Year")["Techs"].mean().replace(0, np.nan)
+    if "Trucks" in df.columns:
+        truck_avg_year = df.groupby("Year")["Trucks"].mean().replace(0, np.nan)
+    else:
+        truck_avg_year = tech_avg_year
     revenue_per_tech = by_year.set_index("Year")["Total Revenue"] / tech_avg_year
     revenue_per_truck = by_year.set_index("Year")["Total Revenue"] / truck_avg_year
 

@@ -46,6 +46,44 @@ def validate_inputs(inputs: Dict) -> None:
             raise ValueError(f"{field} must be in [0,1].")
 
     non_negative_fields = [
+        "calls_per_tech_per_day",
+        "work_days_per_month",
+        "avg_hours_per_tech_per_month",
+        "tech_wage_per_hour",
+        "tools_per_new_tech_capex",
+        "avg_service_ticket",
+        "repl_leads_per_tech_per_month",
+        "avg_repl_ticket",
+        "permit_cost_per_repl_job",
+        "disposal_cost_per_repl_job",
+        "agreements_start",
+        "new_agreements_per_month",
+        "maint_monthly_fee",
+        "cost_per_maint_visit",
+        "maint_visits_per_agreement_per_year",
+        "paid_leads_per_month",
+        "paid_leads_per_tech_per_month",
+        "cost_per_lead",
+        "branding_fixed_monthly",
+        "trucks_per_tech",
+        "truck_payment_monthly",
+        "fuel_per_truck_monthly",
+        "maint_per_truck_monthly",
+        "truck_insurance_per_truck_monthly",
+        "truck_purchase_price",
+        "office_payroll_monthly",
+        "rent_monthly",
+        "utilities_monthly",
+        "insurance_monthly",
+        "software_monthly",
+        "other_fixed_monthly",
+        "starting_cash",
+        "loan_principal",
+        "loan_term_months",
+        "loc_limit",
+        "min_cash_target",
+        "loc_repay_buffer",
+        "distributions_only_if_cash_above",
         "ar_days",
         "ap_days",
         "inventory_days",
@@ -59,6 +97,19 @@ def validate_inputs(inputs: Dict) -> None:
     for field in non_negative_fields:
         if inputs[field] < 0:
             raise ValueError(f"{field} must be non-negative.")
+
+    if not (1 <= inputs["start_month"] <= 12):
+        raise ValueError("start_month must be in [1,12].")
+    if inputs["horizon_months"] < 1:
+        raise ValueError("horizon_months must be at least 1.")
+    if inputs["loan_term_months"] < 1:
+        raise ValueError("loan_term_months must be at least 1.")
+    if inputs["max_techs"] < inputs["starting_techs"]:
+        raise ValueError("max_techs must be >= starting_techs.")
+    if inputs["paid_leads_mode"] not in {"fixed", "per_tech"}:
+        raise ValueError("paid_leads_mode must be 'fixed' or 'per_tech'.")
+    if inputs["capex_trucks_mode"] not in {"payments_only", "purchase_with_downpayment"}:
+        raise ValueError("capex_trucks_mode must be 'payments_only' or 'purchase_with_downpayment'.")
 
 
 
@@ -144,9 +195,10 @@ def run_model(raw_inputs: Dict) -> pd.DataFrame:
     ebitda = gross_profit - total_opex
 
     ar_balance = total_revenue / 30 * i.ar_days
-    direct_minus_labor = service_materials + repl_equipment + permits + disposal + maint_direct_cost
-    ap_balance = direct_minus_labor / 30 * i.ap_days
-    inventory_balance = repl_equipment / 30 * i.inventory_days
+    ap_base = total_direct_costs + marketing_spend + fixed_opex + fleet_cost
+    ap_balance = ap_base / 30 * i.ap_days
+    inventory_base = service_materials + repl_equipment
+    inventory_balance = inventory_base / 30 * i.inventory_days
     nwc = ar_balance + inventory_balance - ap_balance
     change_nwc = np.diff(np.insert(nwc, 0, 0.0))
     operating_cash_flow = ebitda - change_nwc
@@ -236,6 +288,7 @@ def run_model(raw_inputs: Dict) -> pd.DataFrame:
             "Date": dates,
             "Year_Month_Label": dates.strftime("%Y-%m"),
             "Techs": techs,
+            "Trucks": trucks,
             "Calls": calls,
             "Service Revenue": service_rev,
             "Replacement Leads": repl_leads,
