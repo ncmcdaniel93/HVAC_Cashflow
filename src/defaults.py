@@ -1,49 +1,106 @@
-"""Default assumptions for HVAC cash flow model."""
+"""Default assumptions for HVAC cash flow model schema v2."""
+
+from __future__ import annotations
 
 DEFAULTS = {
     # Model controls
-    "start_year": 2025,
+    "start_year": 2026,
     "start_month": 1,
     "horizon_months": 60,
     "monthly_price_growth": 0.002,
     "monthly_cost_inflation": 0.0015,
     "seasonality_amplitude": 0.15,
-    "peak_month": 7,
-    # Staffing and ops
+    "peak_month": 8,
+    "value_mode": "nominal",
+    "discount_rate_annual_nominal": 0.1,
+    # Staffing and operations
     "starting_techs": 8,
-    "tech_hire_per_quarter": 1,
-    "max_techs": 24,
+    "max_techs": 36,
+    "tech_staffing_events": [],
+    "sales_starting_staff": 1,
+    "sales_staffing_events": [],
     "calls_per_tech_per_day": 2.4,
-    "work_days_per_month": 22,
-    "avg_hours_per_tech_per_month": 160,
+    "tech_hours_per_day": 8.0,
+    "sales_hours_per_day": 8.0,
     "tech_wage_per_hour": 34.0,
+    "sales_wage_per_hour": 30.0,
     "payroll_burden_pct": 0.18,
     "tools_per_new_tech_capex": 3500.0,
-    # Service revenue
+    "asset_reuse_lag_months": 3,
+    "asset_expiry_mode": "release",  # release, retain, salvage
+    "asset_salvage_pct": 0.2,
+    "res_capacity_pct": 0.82,
+    # Service and replacement revenue
     "avg_service_ticket": 345.0,
     "service_material_pct": 0.14,
     "attach_rate": 0.35,
-    # Replacement revenue
     "repl_leads_per_tech_per_month": 3.5,
     "repl_close_rate": 0.42,
+    "sales_repl_close_lift_per_fte": 0.01,
+    "sales_repl_close_rate_cap": 0.75,
     "avg_repl_ticket": 9100.0,
     "repl_equipment_pct": 0.49,
     "permit_cost_per_repl_job": 130.0,
     "disposal_cost_per_repl_job": 80.0,
     "financing_penetration": 0.27,
     "financing_fee_pct": 0.045,
-    # Maintenance program
+    # Maintenance program (legacy + segmented v2)
     "enable_maintenance": True,
-    "agreements_start": 400,
-    "new_agreements_per_month": 22,
-    "churn_annual_pct": 0.1,
-    "maint_monthly_fee": 23.0,
-    "cost_per_maint_visit": 72.0,
-    "maint_visits_per_agreement_per_year": 1.8,
+    "agreements_start": 400,  # legacy
+    "new_agreements_per_month": 22,  # legacy
+    "churn_annual_pct": 0.1,  # legacy
+    "maint_monthly_fee": 23.0,  # legacy
+    "cost_per_maint_visit": 72.0,  # legacy
+    "maint_visits_per_agreement_per_year": 1.8,  # legacy
+    "res_agreements_start": 400,
+    "res_new_agreements_per_month": 22,
+    "res_churn_annual_pct": 0.1,
+    "res_maint_monthly_fee": 23.0,
+    "res_cost_per_maint_visit": 72.0,
+    "res_maint_visits_per_agreement_per_year": 1.8,
+    "res_maint_call_conversion_pct": 0.04,
+    "res_maint_agreements_per_tech_per_month": 1.0,
+    "res_maint_hybrid_weight_calls": 0.6,
+    "lc_agreements_start": 80,
+    "lc_new_agreements_per_month": 4,
+    "lc_churn_annual_pct": 0.09,
+    "lc_maint_quarterly_fee": 180.0,
+    "lc_cost_per_maint_visit": 95.0,
+    "lc_maint_visits_per_agreement_per_year": 4.0,
+    "lc_maint_call_conversion_pct": 0.02,
+    "lc_maint_agreements_per_tech_per_month": 0.3,
+    "lc_maint_hybrid_weight_calls": 0.5,
+    "maint_visits_capacity_per_tech_per_month": 34.0,
+    # Upsell assumptions (segmented, incremental economics)
+    "res_service_upsell_conversion_pct": 0.08,
+    "res_service_upsell_revenue_per_visit": 240.0,
+    "res_service_upsell_gross_margin_pct": 0.46,
+    "lc_service_upsell_conversion_pct": 0.05,
+    "lc_service_upsell_revenue_per_visit": 420.0,
+    "lc_service_upsell_gross_margin_pct": 0.42,
+    "res_maint_upsell_conversion_pct": 0.12,
+    "res_maint_upsell_revenue_per_visit": 310.0,
+    "res_maint_upsell_gross_margin_pct": 0.5,
+    "lc_maint_upsell_conversion_pct": 0.07,
+    "lc_maint_upsell_revenue_per_visit": 520.0,
+    "lc_maint_upsell_gross_margin_pct": 0.47,
+    # New-build installs
+    "new_build_mode": "base_seasonal",  # schedule, base_seasonal, annual_total
+    "new_build_seasonality_amplitude": 0.12,
+    "res_new_build_installs_per_month": 2.5,
+    "lc_new_build_installs_per_month": 0.8,
+    "res_new_build_annual_installs": 30.0,
+    "lc_new_build_annual_installs": 10.0,
+    "res_new_build_avg_ticket": 11500.0,
+    "lc_new_build_avg_ticket": 18500.0,
+    "res_new_build_gross_margin_pct": 0.38,
+    "lc_new_build_gross_margin_pct": 0.34,
+    "res_new_build_install_schedule": [],
+    "lc_new_build_install_schedule": [],
     # Marketing
     "paid_leads_mode": "per_tech",
-    "paid_leads_per_month": 350,
-    "paid_leads_per_tech_per_month": 28,
+    "paid_leads_per_month": 350.0,
+    "paid_leads_per_tech_per_month": 28.0,
     "cost_per_lead": 90.0,
     "branding_fixed_monthly": 7000.0,
     # Fleet
@@ -56,17 +113,36 @@ DEFAULTS = {
     "capex_trucks_mode": "purchase_with_downpayment",
     "truck_downpayment_pct": 0.2,
     "truck_financed_pct": 0.8,
-    # Overhead
+    # Overhead and management payroll
     "office_payroll_monthly": 38000.0,
     "rent_monthly": 9000.0,
     "utilities_monthly": 2600.0,
     "insurance_monthly": 3200.0,
     "software_monthly": 2200.0,
     "other_fixed_monthly": 2500.0,
+    "manager_salary_monthly": 0.0,
+    "manager_start_year": 2026,
+    "manager_start_month": 1,
+    "ops_manager_salary_monthly": 0.0,
+    "ops_manager_start_year": 2026,
+    "ops_manager_start_month": 1,
+    "marketing_manager_salary_monthly": 0.0,
+    "marketing_manager_start_year": 2026,
+    "marketing_manager_start_month": 1,
+    # Escalation and raises
+    "raise_effective_month": 1,
+    "annual_raise_pct_tech": 0.04,
+    "annual_raise_pct_sales": 0.04,
+    "annual_raise_pct_manager": 0.04,
+    "annual_raise_pct_ops_manager": 0.04,
+    "annual_raise_pct_marketing_manager": 0.04,
     # Working capital
     "ar_days": 25.0,
     "ap_days": 20.0,
     "inventory_days": 16.0,
+    "opening_ar_balance": 0.0,
+    "opening_ap_balance": 0.0,
+    "opening_inventory_balance": 0.0,
     "starting_cash": 180000.0,
     # Debt
     "enable_term_loan": True,

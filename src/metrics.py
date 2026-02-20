@@ -35,7 +35,7 @@ def compute_metrics(df: pd.DataFrame, horizon_months: int) -> dict:
     total_rev = df["Total Revenue"].sum()
     total_direct = df["Total Direct Costs"].sum()
     cm_pct = _safe_div(total_rev - total_direct, total_rev)
-    fixed_costs = df["Fixed OPEX"].mean() + df["Fleet Cost"].mean() + df["Marketing Spend"].mean()
+    fixed_costs = df["Total OPEX"].mean()
     break_even = _safe_div(fixed_costs, cm_pct)
 
     debt_service_year = by_year["Term Loan Payment"] + by_year["LOC Interest"]
@@ -61,6 +61,7 @@ def compute_metrics(df: pd.DataFrame, horizon_months: int) -> dict:
         "minimum_ending_cash": min_cash,
         "minimum_ending_cash_month": min_cash_month,
         "negative_cash_months": int((df["End Cash"] < 0).sum()),
+        "total_disbursements": float(df["Total Disbursements"].sum()) if "Total Disbursements" in df.columns else 0.0,
         "full_years": int(full_years),
     }
 
