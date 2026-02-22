@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import uuid
 
+import pandas as pd
 from streamlit.testing.v1 import AppTest
 
 
@@ -135,3 +136,84 @@ def test_interactive_widgets_expose_help_tooltips():
             if not isinstance(getattr(widget, "help", None), str) or not str(widget.help).strip()
         ]
         assert not missing, f"{widget_type} widgets missing help: {', '.join(missing[:5])}"
+
+
+def test_sensitivity_target_missing_delta_column_auto_recovers():
+    at = AppTest.from_file("app.py")
+    at.run(timeout=180)
+    _assert_no_app_exceptions(at)
+
+    # Simulate stale sensitivity schema persisted from an older app build.
+    stale_df = pd.DataFrame(
+        [
+            {"Driver": "tech_wage_per_hour", "Case": "Low", "Delta Year N EBITDA": 1250.0},
+            {"Driver": "tech_wage_per_hour", "Case": "High", "Delta Year N EBITDA": -1100.0},
+        ]
+    )
+    at.session_state["sensitivity_result_df"] = stale_df
+    if not at.session_state["sensitivity_drivers"]:
+        at.session_state["sensitivity_drivers"] = ["tech_wage_per_hour"]
+
+    _widget_by_label(at.selectbox, "Target metric").set_value("Break-even Labor Rate")
+    at.run(timeout=180)
+    _assert_no_app_exceptions(at)
+    recovered_df = at.session_state["sensitivity_result_df"] if "sensitivity_result_df" in at.session_state else None
+    assert recovered_df is not None
+    assert "Delta Break-even Labor Rate" in recovered_df.columns
+
+
+def test_analyst_pdf_controls_generate_payload_and_download_button():
+    at = AppTest.from_file("app.py")
+    at.run(timeout=240)
+    _assert_no_app_exceptions(at)
+
+    _widget_by_label(at.button, "Generate Analyst PDF").click()
+    at.run(timeout=240)
+    _assert_no_app_exceptions(at)
+
+    assert "pdf_export_payload_bytes" in at.session_state
+    payload = at.session_state["pdf_export_payload_bytes"]
+    assert isinstance(payload, (bytes, bytearray))
+    assert len(payload) > 500
+    assert "pdf_export_filename" in at.session_state
+    assert str(at.session_state["pdf_export_filename"]).endswith(".pdf")
+
+
+def test_analyst_pdf_generation_supports_custom_charts_and_engine_fallback():
+    at = AppTest.from_file("app.py")
+    at.run(timeout=240)
+    _assert_no_app_exceptions(at)
+
+    at.checkbox(key="chart_1_enabled").set_value(True)
+    at.text_input(key="chart_1_title").set_value("Custom Smoke Chart")
+    at.selectbox(key="chart_1_type").set_value("line")
+    at.multiselect(key="chart_1_cols").set_value(["Total Revenue", "EBITDA"])
+    at.run(timeout=240)
+
+    _widget_by_label(at.button, "Generate Analyst PDF").click()
+    at.run(timeout=240)
+    _assert_no_app_exceptions(at)
+
+    assert "pdf_export_summary" in at.session_state
+    summary = at.session_state["pdf_export_summary"]
+    assert isinstance(summary, dict)
+    assert int(summary.get("chart_count", 0)) >= 23
+    assert int(summary.get("chart_placeholders", 0)) >= 0
+
+
+def test_storage_location_custom_path_apply_flow():
+    at = AppTest.from_file("app.py")
+    at.run(timeout=240)
+    _assert_no_app_exceptions(at)
+
+    custom_rel = f".local_store/storage_smoke_{uuid.uuid4().hex[:8]}"
+    _widget_by_label(at.radio, "Storage Mode").set_value("Custom server folder path")
+    at.run(timeout=240)
+    _widget_by_label(at.text_input, "Custom Storage Folder").set_value(custom_rel)
+    at.run(timeout=240)
+    _widget_by_label(at.button, "Apply Storage Location").click()
+    at.run(timeout=240)
+    _assert_no_app_exceptions(at)
+
+    assert "storage_active_path" in at.session_state
+    assert str(at.session_state["storage_active_path"])

@@ -34,3 +34,10 @@ def test_runtime_logging_handles_malformed_lines(tmp_path, monkeypatch):
     assert len(events) == 2
     assert events[0]["event"] == "ok"
     assert events[1]["event"] == "log_parse_error"
+
+
+def test_configure_log_root_updates_runtime_log_paths(tmp_path):
+    configured = runtime_logging.configure_log_root(tmp_path / "diag_logs")
+    assert configured == tmp_path / "diag_logs"
+    assert runtime_logging.LOG_DIR == tmp_path / "diag_logs"
+    assert runtime_logging.RUNTIME_EVENTS_LOG_FILE == (tmp_path / "diag_logs" / "runtime_events.jsonl")

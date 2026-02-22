@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from streamlit.runtime.scriptrunner import get_script_run_ctx
+
 
 LOG_DIR = Path(".local_store")
 RUNTIME_EVENTS_LOG_FILE = LOG_DIR / "runtime_events.jsonl"
+
+_DEFAULT_LOG_DIR = Path(".local_store")
+_STORAGE_ENV_VAR = "HVAC_STORAGE_ROOT"
 
 _EXCEPTION_HOOK_INSTALLED = False
 
@@ -24,6 +30,23 @@ def _safe_json_default(value: Any):
     if isinstance(value, (set, tuple)):
         return list(value)
     return str(value)
+
+
+def _expand_log_root(path_value: str | Path | None) -> Path:
+    if path_value is None:
+        return _DEFAULT_LOG_DIR
+    text = str(path_value).strip()
+    if not text:
+        return _DEFAULT_LOG_DIR
+    expanded = os.path.expandvars(os.path.expanduser(text))
+    return Path(expanded)
+
+
+def configure_log_root(path_value: str | Path | None) -> Path:
+    global LOG_DIR, RUNTIME_EVENTS_LOG_FILE
+    LOG_DIR = _expand_log_root(path_value)
+    RUNTIME_EVENTS_LOG_FILE = LOG_DIR / "runtime_events.jsonl"
+    return LOG_DIR
 
 
 def runtime_log_path() -> str:
@@ -94,6 +117,11 @@ def install_global_exception_logging() -> None:
 
     def _hook(exc_type, exc, exc_tb):
         try:
+            # Avoid polluting runtime diagnostics with non-Streamlit process exceptions
+            # (for example, ad-hoc local scripts that import app modules).
+            if get_script_run_ctx() is None:
+                old_hook(exc_type, exc, exc_tb)
+                return
             tb_text = "".join(traceback.format_exception(exc_type, exc, exc_tb))
             append_runtime_event(
                 level="ERROR",
@@ -108,3 +136,6 @@ def install_global_exception_logging() -> None:
 
     sys.excepthook = _hook
     _EXCEPTION_HOOK_INSTALLED = True
+
+
+configure_log_root(os.getenv(_STORAGE_ENV_VAR, ""))

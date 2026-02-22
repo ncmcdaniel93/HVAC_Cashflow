@@ -37,6 +37,18 @@ def compute_metrics(df: pd.DataFrame, horizon_months: int) -> dict:
     cm_pct = _safe_div(total_rev - total_direct, total_rev)
     fixed_costs = df["Total OPEX"].mean()
     break_even = _safe_div(fixed_costs, cm_pct)
+    avg_monthly_tech_hours = float(df["Tech Hours"].mean()) if "Tech Hours" in df.columns else 0.0
+    break_even_labor_rate = _safe_div(break_even, avg_monthly_tech_hours)
+    direct_labor_total = float(df["Direct Labor"].sum()) if "Direct Labor" in df.columns else 0.0
+    if "Tech Labor Cost per Wage Unit" in df.columns:
+        tech_labor_coeff_total = float(df["Tech Labor Cost per Wage Unit"].sum())
+    else:
+        # Backward compatibility for stale cached frames produced before this column existed.
+        tech_wage = float(df.attrs.get("tech_wage_per_hour", 0.0) or 0.0)
+        tech_labor_coeff_total = _safe_div(direct_labor_total, tech_wage) if tech_wage > 0 else 0.0
+    non_labor_direct_total = float(total_direct - direct_labor_total)
+    total_opex_sum = float(df["Total OPEX"].sum()) if "Total OPEX" in df.columns else 0.0
+    break_even_wage_rate = _safe_div(total_rev - non_labor_direct_total - total_opex_sum, tech_labor_coeff_total)
 
     debt_service_year = by_year["Term Loan Payment"] + by_year["LOC Interest"]
     dscr = by_year["EBITDA"] / debt_service_year.replace(0, np.nan)
@@ -56,6 +68,8 @@ def compute_metrics(df: pd.DataFrame, horizon_months: int) -> dict:
         "revenue_per_truck_by_year": revenue_per_truck,
         "cac": cac,
         "break_even_revenue": break_even,
+        "break_even_labor_rate_per_tech_hour": break_even_labor_rate,
+        "break_even_wage_rate_per_hour": break_even_wage_rate,
         "ccc": df.attrs.get("ar_days", 0) + df.attrs.get("inventory_days", 0) - df.attrs.get("ap_days", 0),
         "dscr_by_year": dscr,
         "minimum_ending_cash": min_cash,

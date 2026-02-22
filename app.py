@@ -1,8 +1,11 @@
 import json
+import importlib.util
+import os
 from copy import deepcopy
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
+import tempfile
 
 import pandas as pd
 import plotly.express as px
@@ -13,20 +16,36 @@ from streamlit.errors import StreamlitAPIException
 from src.defaults import DEFAULTS
 from src.goal_seek import solve_bounded_scalar
 from src.integrity_checks import run_integrity_checks
-from src.input_metadata import INPUT_GUIDANCE, advisory_warnings, help_with_guidance
+from src.input_metadata import (
+    INPUT_GUIDANCE,
+    advisory_warnings,
+    calculation_logic_detail,
+    help_with_guidance,
+    impact_detail,
+)
 from src.metrics import compute_metrics
 from src.model import run_model
 from src.persistence import (
     build_scenario_bundle,
     build_workspace_bundle,
+    configure_storage_root,
     delete_saved,
     list_saved_names,
     load_saved,
     parse_import_json,
     save_named_bundle,
+    storage_root_path,
+)
+from src.pdf_export import build_analyst_pdf_report_bytes, build_pdf_chart_images
+from src.change_requests import (
+    append_change_request,
+    change_request_log_path,
+    configure_change_request_root,
+    read_change_requests,
 )
 from src.runtime_logging import (
     append_runtime_event,
+    configure_log_root,
     install_global_exception_logging,
     read_runtime_events,
     runtime_log_path,
@@ -163,6 +182,61 @@ SCENARIO_TEMPLATE_DETAIL_SPECS = {
         "columns": ["scenario_name", "month", "installs"],
     },
 }
+
+STORAGE_MODE_DEFAULT = "App default storage"
+STORAGE_MODE_SESSION_TEMP = "Session temp storage (cloud-friendly)"
+STORAGE_MODE_CUSTOM = "Custom server folder path"
+
+
+def _is_streamlit_cloud_runtime() -> bool:
+    env = os.environ
+    cloud_markers = [
+        "STREAMLIT_SHARING_MODE",
+        "STREAMLIT_CLOUD",
+        "STREAMLIT_RUNTIME_ENV",
+        "STREAMLIT_DEPLOYMENT_ID",
+    ]
+    if any(str(env.get(k, "")).strip() for k in cloud_markers):
+        return True
+    host = str(env.get("HOSTNAME", "")).lower()
+    return "streamlit" in host and "cloud" in host
+
+
+def _expand_storage_path(path_text: str) -> Path:
+    expanded = os.path.expandvars(os.path.expanduser(str(path_text or "").strip()))
+    return Path(expanded) if expanded else Path(".local_store")
+
+
+def _configured_storage_root_text() -> str:
+    env_value = str(os.getenv("HVAC_STORAGE_ROOT", "")).strip()
+    if env_value:
+        return env_value
+    try:
+        secret_value = str(st.secrets.get("HVAC_STORAGE_ROOT", "")).strip()
+    except Exception:
+        secret_value = ""
+    return secret_value
+
+
+def _resolve_storage_root(mode: str, custom_path: str, session_token: str) -> Path:
+    if mode == STORAGE_MODE_CUSTOM:
+        if not str(custom_path or "").strip():
+            raise ValueError("Custom storage path is empty.")
+        return _expand_storage_path(custom_path)
+    if mode == STORAGE_MODE_SESSION_TEMP:
+        token = str(session_token or "default")
+        return Path(tempfile.gettempdir()) / "hvac_cashflow_storage" / token
+    configured = _configured_storage_root_text()
+    return _expand_storage_path(configured) if configured else Path(".local_store")
+
+
+def _apply_storage_root(path: Path) -> Path:
+    root = Path(path)
+    root.mkdir(parents=True, exist_ok=True)
+    configure_storage_root(root)
+    configure_log_root(root)
+    configure_change_request_root(root)
+    return root
 
 SCENARIO_TEMPLATE_ENUM_OPTIONS = {
     "value_mode": ["nominal", "real_inflation", "real_pv"],
@@ -858,20 +932,31 @@ def _display_help_panel() -> None:
         query = st.text_input("Filter guidance", placeholder="Search by input key or topic")
         rows = []
         for key, g in INPUT_GUIDANCE.items():
-            rows.append({"Input": key, "Range": f"{g['min']} to {g['max']}", "Guidance": g["note"]})
+            rows.append(
+                {
+                    "Input": key,
+                    "Range": f"{g['min']} to {g['max']}",
+                    "Guidance": g["note"],
+                    "Calculation Use": calculation_logic_detail(key),
+                    "Impact": impact_detail(key),
+                }
+            )
         guidance_df = pd.DataFrame(rows)
         if query:
             q = query.strip().lower()
             guidance_df = guidance_df[
                 guidance_df["Input"].str.lower().str.contains(q, regex=False)
                 | guidance_df["Guidance"].str.lower().str.contains(q, regex=False)
+                | guidance_df["Calculation Use"].str.lower().str.contains(q, regex=False)
+                | guidance_df["Impact"].str.lower().str.contains(q, regex=False)
             ]
         st.dataframe(_format_dataframe_for_display(guidance_df), width="stretch", hide_index=True)
 
 
 def _sensitivity_objective_sign(target_metric: str) -> float:
-    # Most targets are "higher is better"; disbursements is "lower is better".
-    return -1.0 if target_metric == "Total Disbursements" else 1.0
+    # Most targets are "higher is better"; cash-outflow and break-even thresholds are "lower is better".
+    lower_is_better = {"Total Disbursements", "Break-even Revenue", "Break-even Labor Rate", "Break-even Wage Rate"}
+    return -1.0 if target_metric in lower_is_better else 1.0
 
 
 def _build_sensitivity_insights(sens_df: pd.DataFrame, target_metric: str, delta_pct: float) -> pd.DataFrame:
@@ -1191,6 +1276,10 @@ def _widget_impact_hint(model_key: str | None, key: str, label: str, widget_type
             return "Impact: affects UI/workflow only; core cashflow math is unchanged."
         return "Impact: updates this application control."
 
+    specific_impact = impact_detail(model_key)
+    if specific_impact:
+        return f"Impact: {specific_impact}"
+
     if str(model_key).startswith("enable_") or widget_type in {"toggle", "checkbox"}:
         return "Impact: turns this model feature on/off and can materially change outputs."
     if any(tok in text for tok in ("horizon", "start_year", "start_month", "peak_month", "seasonality", "effective_month")):
@@ -1361,9 +1450,11 @@ def _build_widget_help(
     file_types=None,
 ) -> str:
     model_key = _resolve_model_key_for_help(key)
+    calc_hint = calculation_logic_detail(model_key) if model_key else ""
     parts = [
         _base_widget_help(label, key, model_key, widget_type),
         _widget_usage_hint(widget_type, label),
+        f"Calculation use: {calc_hint}" if calc_hint else "",
         _widget_impact_hint(model_key, key, label, widget_type),
         _widget_range_hint(
             model_key=model_key,
@@ -1378,8 +1469,8 @@ def _build_widget_help(
     ]
     merged = " ".join(str(part).strip() for part in parts if str(part).strip())
     merged = " ".join(merged.split())
-    if len(merged) > 520:
-        return f"{merged[:517].rstrip()}..."
+    if len(merged) > 900:
+        return f"{merged[:897].rstrip()}..."
     return merged
 
 
@@ -2094,6 +2185,53 @@ def _build_ai_export_pack(
     }
 
 
+def _build_pdf_report_input(
+    *,
+    assumptions: dict,
+    nominal_df: pd.DataFrame,
+    view_df: pd.DataFrame,
+    range_df: pd.DataFrame,
+    metrics_range: dict,
+    metrics_full: dict,
+    annual_kpis_range: pd.DataFrame,
+    annual_kpis_full: pd.DataFrame,
+    input_warnings: list[str],
+    integrity_findings: list[dict],
+    sensitivity_df: pd.DataFrame | None,
+    sensitivity_target: str | None,
+    sensitivity_target_year: int | None,
+) -> dict:
+    workspace_name = str(st.session_state.get("active_workspace_name", "")).strip()
+    scenario_name = workspace_name or str(st.session_state.get("preset_choice", "")).strip() or "active_scenario"
+    input_ts_df = _build_input_timeseries(assumptions, pd.DatetimeIndex(view_df["Date"]))
+    custom_chart_configs = _current_ui_state().get("custom_charts", [])
+    return {
+        "scenario_name": scenario_name,
+        "generated_at_utc": pd.Timestamp.utcnow().isoformat(),
+        "value_mode": assumptions.get("value_mode", "nominal"),
+        "range_start_label": st.session_state.get("range_start_label", ""),
+        "range_end_label": st.session_state.get("range_end_label", ""),
+        "model_version": "v2",
+        "assumptions": deepcopy(assumptions),
+        "metrics_range": deepcopy(metrics_range),
+        "metrics_full": deepcopy(metrics_full),
+        "annual_kpis_range": annual_kpis_range.copy(),
+        "annual_kpis_full": annual_kpis_full.copy(),
+        "range_df": range_df.copy(),
+        "view_df": view_df.copy(),
+        "nominal_df": nominal_df.copy(),
+        "input_ts_df": input_ts_df,
+        "input_warnings": list(input_warnings or []),
+        "integrity_findings": deepcopy(integrity_findings or []),
+        "sensitivity_df": sensitivity_df.copy() if isinstance(sensitivity_df, pd.DataFrame) else None,
+        "sensitivity_target": sensitivity_target,
+        "sensitivity_target_year": sensitivity_target_year,
+        "transformation_logic": _ai_transformation_logic_summary(),
+        "custom_chart_configs": custom_chart_configs,
+        "custom_chart_data_df": range_df.copy(),
+    }
+
+
 def _template_value_missing(value) -> bool:
     if value is None:
         return True
@@ -2432,12 +2570,35 @@ def _build_scenario_template_frames(seed_scenarios: list[dict]) -> dict[str, pd.
 
 
 def _build_scenario_template_excel_bytes(frames: dict[str, pd.DataFrame]) -> bytes:
+    available_engines = [
+        engine
+        for engine in ("xlsxwriter", "openpyxl")
+        if importlib.util.find_spec(engine) is not None
+    ]
+    if not available_engines:
+        raise RuntimeError("No Excel writer engine installed. Install openpyxl or xlsxwriter.")
+
     output = BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        for sheet_name, frame in frames.items():
-            frame.to_excel(writer, sheet_name=sheet_name[:31], index=False)
-    output.seek(0)
-    return output.getvalue()
+    last_exc: Exception | None = None
+    for engine in available_engines:
+        try:
+            output.seek(0)
+            output.truncate(0)
+            with pd.ExcelWriter(output, engine=engine) as writer:
+                for sheet_name, frame in frames.items():
+                    frame.to_excel(writer, sheet_name=sheet_name[:31], index=False)
+            output.seek(0)
+            payload = output.getvalue()
+            if payload:
+                return payload
+        except Exception as exc:
+            last_exc = exc
+
+    if last_exc is not None:
+        raise RuntimeError(
+            f"Excel template export failed using engines {', '.join(available_engines)}: {last_exc}"
+        ) from last_exc
+    raise RuntimeError("Excel template export failed for an unknown reason.")
 
 
 st.set_page_config(page_title="HVAC Cash Flow Model v2", layout="wide")
@@ -2498,6 +2659,42 @@ st.markdown(
     }
     div[data-testid="stMetricValue"] {
         font-variant-numeric: tabular-nums;
+        font-size: clamp(0.92rem, 1.25vw, 1.55rem);
+        line-height: 1.15;
+        white-space: normal;
+        overflow-wrap: anywhere;
+    }
+    div[data-testid="stMetricLabel"] p {
+        font-size: clamp(0.64rem, 0.82vw, 0.95rem);
+        line-height: 1.2;
+        white-space: normal;
+    }
+    div[data-testid="stMetricDelta"] {
+        font-size: clamp(0.62rem, 0.78vw, 0.92rem);
+        line-height: 1.15;
+        white-space: normal;
+    }
+    @media (max-width: 1500px) {
+        div[data-testid="stMetricValue"] {
+            font-size: clamp(0.82rem, 1.08vw, 1.28rem);
+        }
+        div[data-testid="stMetricLabel"] p {
+            font-size: clamp(0.60rem, 0.74vw, 0.86rem);
+        }
+        div[data-testid="stMetricDelta"] {
+            font-size: clamp(0.58rem, 0.70vw, 0.82rem);
+        }
+    }
+    @media (max-width: 1200px) {
+        div[data-testid="stMetricValue"] {
+            font-size: clamp(0.76rem, 0.98vw, 1.08rem);
+        }
+        div[data-testid="stMetricLabel"] p {
+            font-size: clamp(0.56rem, 0.66vw, 0.74rem);
+        }
+        div[data-testid="stMetricDelta"] {
+            font-size: clamp(0.54rem, 0.62vw, 0.70rem);
+        }
     }
     </style>
     """,
@@ -2521,9 +2718,21 @@ st.session_state.setdefault("ai_export_log_limit", 200)
 st.session_state.setdefault("ai_export_payload_json", "")
 st.session_state.setdefault("ai_export_filename", "")
 st.session_state.setdefault("ai_export_summary", "")
+st.session_state.setdefault("pdf_export_payload_bytes", b"")
+st.session_state.setdefault("pdf_export_filename", "")
+st.session_state.setdefault("pdf_export_summary", {})
+st.session_state.setdefault("sensitivity_target_metric", "Year N EBITDA")
 st.session_state.setdefault("template_include_active", True)
 st.session_state.setdefault("template_seed_saved_scenarios", [])
 st.session_state.setdefault("template_import_overwrite", False)
+if "storage_session_token" not in st.session_state:
+    st.session_state["storage_session_token"] = pd.Timestamp.utcnow().strftime("%Y%m%d%H%M%S%f")
+default_storage_mode = STORAGE_MODE_SESSION_TEMP if _is_streamlit_cloud_runtime() else STORAGE_MODE_DEFAULT
+st.session_state.setdefault("storage_mode", default_storage_mode)
+st.session_state.setdefault("storage_custom_path", _configured_storage_root_text())
+st.session_state.setdefault("storage_active_path", storage_root_path())
+st.session_state.setdefault("storage_configured", False)
+st.session_state.setdefault("storage_config_error", "")
 _apply_deferred_state_updates()
 if "preset_scenarios" not in st.session_state or not isinstance(st.session_state.get("preset_scenarios"), dict):
     st.session_state["preset_scenarios"] = deepcopy(PRESET_SCENARIOS)
@@ -2538,10 +2747,99 @@ for slot in range(1, 5):
     st.session_state.setdefault(f"chart_{slot}_cols", [])
     st.session_state.setdefault(f"chart_{slot}_title", f"Custom Chart {slot}")
 
+storage_resolved_error = ""
+try:
+    desired_storage_root = _resolve_storage_root(
+        st.session_state.get("storage_mode", STORAGE_MODE_DEFAULT),
+        st.session_state.get("storage_custom_path", ""),
+        st.session_state.get("storage_session_token", ""),
+    )
+except Exception as exc:
+    desired_storage_root = _expand_storage_path(st.session_state.get("storage_active_path", ".local_store"))
+    storage_resolved_error = str(exc)
+if (not st.session_state.get("storage_configured")) or (
+    str(desired_storage_root.resolve()) != str(Path(st.session_state.get("storage_active_path", ".local_store")).resolve())
+):
+    try:
+        applied_root = _apply_storage_root(desired_storage_root)
+        st.session_state["storage_active_path"] = str(applied_root.resolve())
+        st.session_state["storage_configured"] = True
+        st.session_state["storage_config_error"] = ""
+    except Exception as exc:
+        fallback_root = _apply_storage_root(Path(".local_store"))
+        st.session_state["storage_active_path"] = str(fallback_root.resolve())
+        st.session_state["storage_configured"] = True
+        st.session_state["storage_config_error"] = (
+            storage_resolved_error or f"Could not apply storage path `{desired_storage_root}`: {exc}"
+        )
+else:
+    _apply_storage_root(Path(st.session_state.get("storage_active_path", ".local_store")))
+    if storage_resolved_error:
+        st.session_state["storage_config_error"] = storage_resolved_error
+
 manual_apply_inputs = False
 
 with st.sidebar:
     st.caption("Tip: drag the lower-right corner of this sidebar to resize width.")
+    st.subheader("Storage Location")
+    st.radio(
+        "Storage Mode",
+        [STORAGE_MODE_DEFAULT, STORAGE_MODE_SESSION_TEMP, STORAGE_MODE_CUSTOM],
+        key="storage_mode",
+        help=(
+            "Choose where scenarios/workspaces/runtime logs are saved. "
+            "On Streamlit Community Cloud, session temp storage avoids cross-user collisions."
+        ),
+    )
+    if st.session_state["storage_mode"] == STORAGE_MODE_CUSTOM:
+        st.text_input(
+            "Custom Storage Folder",
+            key="storage_custom_path",
+            placeholder="e.g., /mount/data/hvac or C:\\HVAC\\shared_store",
+            help="Server-side path only. Browser local folders cannot be mounted directly in cloud runtime.",
+        )
+    else:
+        st.caption(f"Active root: `{st.session_state.get('storage_active_path', storage_root_path())}`")
+
+    apply_storage = st.button(
+        "Apply Storage Location",
+        help="Apply selected storage mode/path for scenarios, workspaces, and runtime/change logs.",
+    )
+    if apply_storage:
+        try:
+            chosen_root = _resolve_storage_root(
+                st.session_state.get("storage_mode", STORAGE_MODE_DEFAULT),
+                st.session_state.get("storage_custom_path", ""),
+                st.session_state.get("storage_session_token", ""),
+            )
+            applied_root = _apply_storage_root(chosen_root)
+            st.session_state["storage_active_path"] = str(applied_root.resolve())
+            st.session_state["storage_configured"] = True
+            st.session_state["storage_config_error"] = ""
+            append_runtime_event(
+                level="INFO",
+                event="storage_root_configured",
+                message="Storage location updated by user.",
+                context={
+                    "storage_mode": st.session_state.get("storage_mode"),
+                    "storage_active_path": st.session_state.get("storage_active_path"),
+                },
+            )
+            st.success(f"Storage root set to `{st.session_state['storage_active_path']}`.")
+        except Exception as exc:
+            st.session_state["storage_config_error"] = str(exc)
+            append_runtime_event(
+                level="WARNING",
+                event="storage_root_config_failed",
+                message="Failed to apply requested storage location.",
+                context={"storage_mode": st.session_state.get("storage_mode")},
+                exc=exc,
+            )
+            st.error(f"Storage location update failed: {exc}")
+    if st.session_state.get("storage_config_error"):
+        st.warning(f"Storage configuration warning: {st.session_state['storage_config_error']}")
+
+    st.caption(f"Current storage root: `{st.session_state.get('storage_active_path', storage_root_path())}`")
     st.header("Scenario Manager")
     preset_options = list(st.session_state["preset_scenarios"].keys())
     if not preset_options:
@@ -2593,7 +2891,7 @@ with st.sidebar:
     if st.session_state.get("auto_run_model", True):
         st.caption("Turn off Live Recalculate to batch edits and apply once.")
 
-    st.subheader("Local Save/Load")
+    st.subheader("Scenario Save/Load")
     save_name_raw = st.text_input(
         "Save Name",
         value=st.session_state.get("active_workspace_name", ""),
@@ -2862,7 +3160,11 @@ with st.sidebar:
             context={"seed_count": len(template_seed_scenarios)},
             exc=exc,
         )
-        st.warning("Excel template could not be generated in this environment. CSV exports are still available.")
+        st.warning(
+            f"Excel template unavailable in this build: {exc}. "
+            "CSV exports are still available."
+        )
+        st.caption("Install `openpyxl` or `xlsxwriter`, then rebuild the distributable package to enable Excel export.")
     if template_excel_bytes is not None:
         st.download_button(
             "Download Scenario Template (Excel)",
@@ -3853,7 +4155,7 @@ except ValueError as exc:
 input_warning_signature = _stable_json(input_warnings)
 if input_warnings and st.session_state.get("_input_warning_log_signature") != input_warning_signature:
     append_runtime_event(
-        level="WARNING",
+        level="INFO",
         event="input_warnings",
         message=f"{len(input_warnings)} input warning(s) generated during model run.",
         context={"warnings": input_warnings},
@@ -3906,6 +4208,7 @@ for dframe in (nominal_df,):
     dframe.attrs["ar_days"] = assumptions["ar_days"]
     dframe.attrs["ap_days"] = assumptions["ap_days"]
     dframe.attrs["inventory_days"] = assumptions["inventory_days"]
+    dframe.attrs["tech_wage_per_hour"] = assumptions["tech_wage_per_hour"]
 
 view_df = apply_value_mode(nominal_df, assumptions, assumptions["value_mode"])
 for dframe in (view_df,):
@@ -3913,6 +4216,7 @@ for dframe in (view_df,):
     dframe.attrs["ar_days"] = assumptions["ar_days"]
     dframe.attrs["ap_days"] = assumptions["ap_days"]
     dframe.attrs["inventory_days"] = assumptions["inventory_days"]
+    dframe.attrs["tech_wage_per_hour"] = assumptions["tech_wage_per_hour"]
 
 labels = view_df["Year_Month_Label"].tolist()
 if not st.session_state["range_start_label"] or st.session_state["range_start_label"] not in labels:
@@ -4178,6 +4482,111 @@ with st.sidebar:
             help="Upload this JSON directly to ChatGPT or other AI tools for context-rich analysis.",
         )
 
+    st.subheader("Analyst PDF Report")
+    st.caption(
+        "Generate a chart-heavy business analyst PDF for the active scenario, including KPIs, multi-perspective charts, and detailed appendix tables."
+    )
+    generate_pdf_export = st.button(
+        "Generate Analyst PDF",
+        help="Build a current-scenario analyst report with comprehensive charts and detailed appendix context.",
+    )
+    if generate_pdf_export:
+        append_runtime_event(
+            level="INFO",
+            event="pdf_export_build_started",
+            message="Building analyst PDF report.",
+            context={
+                "scenario_name": st.session_state.get("active_workspace_name", "") or "active_scenario",
+                "range_start_label": st.session_state.get("range_start_label", ""),
+                "range_end_label": st.session_state.get("range_end_label", ""),
+            },
+        )
+        with st.spinner("Building analyst PDF report..."):
+            try:
+                report_input = _build_pdf_report_input(
+                    assumptions=assumptions,
+                    nominal_df=nominal_df,
+                    view_df=view_df,
+                    range_df=range_df,
+                    metrics_range=metrics_range,
+                    metrics_full=metrics_full,
+                    annual_kpis_range=annual_kpis_range,
+                    annual_kpis_full=annual_kpis_full,
+                    input_warnings=input_warnings,
+                    integrity_findings=integrity_findings,
+                    sensitivity_df=st.session_state.get("sensitivity_result_df"),
+                    sensitivity_target=st.session_state.get("sensitivity_target_metric"),
+                    sensitivity_target_year=st.session_state.get("sensitivity_result_year"),
+                )
+                pdf_options = {
+                    "chart_pack": "comprehensive",
+                    "include_enabled_custom_charts": True,
+                    "appendix_detail": "maximum",
+                    "time_basis": "range_plus_full_reference",
+                    "chart_width_px": 1400,
+                    "chart_height_px": 800,
+                    "allow_dependency_bootstrap": not bool(st.session_state.get("$$STREAMLIT_INTERNAL_KEY_TESTING")),
+                    "dependency_bootstrap_timeout_sec": 300,
+                    "log_event": append_runtime_event,
+                }
+                chart_images = build_pdf_chart_images(report_input, pdf_options)
+                pdf_options["chart_images_override"] = chart_images
+                pdf_bytes = build_analyst_pdf_report_bytes(report_input, pdf_options)
+            except Exception as exc:
+                append_runtime_event(
+                    level="ERROR",
+                    event="pdf_export_build_failed",
+                    message="Failed to build analyst PDF report.",
+                    context={},
+                    exc=exc,
+                )
+                st.error(f"Analyst PDF export failed: {exc}")
+            else:
+                timestamp = pd.Timestamp.utcnow().strftime("%Y%m%d_%H%M%S")
+                chart_count = int(len(chart_images))
+                chart_rendered = int(sum(1 for c in chart_images if c.get("image_bytes")))
+                chart_placeholders = chart_count - chart_rendered
+                payload_bytes = bytes(pdf_bytes)
+                st.session_state["pdf_export_payload_bytes"] = payload_bytes
+                st.session_state["pdf_export_filename"] = f"hvac_analyst_report_{timestamp}.pdf"
+                st.session_state["pdf_export_summary"] = {
+                    "chart_count": chart_count,
+                    "chart_images_rendered": chart_rendered,
+                    "chart_placeholders": chart_placeholders,
+                    "file_size_bytes": len(payload_bytes),
+                }
+                append_runtime_event(
+                    level="INFO",
+                    event="pdf_export_ready",
+                    message="Analyst PDF report generated.",
+                    context=deepcopy(st.session_state["pdf_export_summary"]),
+                )
+                st.success("Analyst PDF report is ready for download.")
+                if chart_placeholders > 0:
+                    st.warning(
+                        "Some charts could not render as images in this environment. "
+                        "The app attempted engine setup automatically. "
+                        "If placeholders remain, rerun once and confirm internet access for one-time engine/bootstrap install."
+                    )
+
+    pdf_payload = st.session_state.get("pdf_export_payload_bytes", b"")
+    if isinstance(pdf_payload, (bytes, bytearray)) and len(pdf_payload) > 0:
+        pdf_summary = st.session_state.get("pdf_export_summary", {}) if isinstance(st.session_state.get("pdf_export_summary"), dict) else {}
+        size_kb = len(pdf_payload) / 1024.0
+        chart_count = int(pdf_summary.get("chart_count", 0))
+        placeholders = int(pdf_summary.get("chart_placeholders", 0))
+        st.caption(
+            f"Prepared report: `{st.session_state.get('pdf_export_filename', 'hvac_analyst_report.pdf')}` "
+            f"({size_kb:,.1f} KB, {chart_count} charts, {placeholders} placeholders)."
+        )
+        st.download_button(
+            "Download Analyst PDF",
+            data=pdf_payload,
+            file_name=st.session_state.get("pdf_export_filename", "hvac_analyst_report.pdf"),
+            mime="application/pdf",
+            help="Download the current-scenario analyst report as PDF.",
+        )
+
 if st.session_state["autosave_enabled"] and st.session_state.get("active_workspace_name"):
     autosave_name = st.session_state["active_workspace_name"]
     autosave_bundle = build_workspace_bundle(autosave_name, assumptions, _current_ui_state())
@@ -4199,6 +4608,110 @@ status_4.metric(
     "Range",
     f"{st.session_state['range_start_label']} to {st.session_state['range_end_label']}",
 )
+
+feedback_spacer, feedback_col = st.columns([0.74, 0.26], vertical_alignment="top")
+with feedback_col:
+    with st.popover(
+        "Change Request",
+        use_container_width=True,
+        help="Submit enhancement ideas directly into the sprint-backlog log.",
+    ):
+        st.caption("Capture UX/UI, model-logic, or reporting enhancements for future sprints.")
+        with st.form("change_request_form", clear_on_submit=True):
+            change_category = st.selectbox(
+                "Category",
+                [
+                    "UX/UI",
+                    "Model Logic",
+                    "Reporting/Exports",
+                    "Data Validation",
+                    "Performance",
+                    "Workflow/Productivity",
+                    "Other",
+                ],
+                key="change_req_category",
+            )
+            change_priority = st.selectbox(
+                "Priority",
+                ["Medium", "High", "Low", "Critical"],
+                key="change_req_priority",
+            )
+            change_title = st.text_input(
+                "Title",
+                key="change_req_title",
+                placeholder="Short summary of the enhancement request",
+            )
+            change_details = st.text_area(
+                "Details",
+                key="change_req_details",
+                placeholder="What is cumbersome today? What should change?",
+                height=120,
+            )
+            change_outcome = st.text_area(
+                "Expected Outcome",
+                key="change_req_expected_outcome",
+                placeholder="How should this improve decisions, speed, reliability, or user experience?",
+                height=90,
+            )
+            include_context = st.checkbox(
+                "Attach scenario + range context",
+                value=True,
+                key="change_req_include_context",
+            )
+            submitted = st.form_submit_button(
+                "Submit Change Request",
+                type="primary",
+                help="Save this enhancement request into the local sprint-backlog log.",
+            )
+            if submitted:
+                context_payload = {}
+                if include_context:
+                    context_payload = {
+                        "active_workspace_name": st.session_state.get("active_workspace_name", ""),
+                        "preset_choice": st.session_state.get("preset_choice", ""),
+                        "value_mode": assumptions.get("value_mode", ""),
+                        "range_start_label": st.session_state.get("range_start_label", ""),
+                        "range_end_label": st.session_state.get("range_end_label", ""),
+                        "selected_range_months": int(len(range_df)),
+                    }
+                ok, message, request_id = append_change_request(
+                    title=change_title,
+                    details=change_details,
+                    category=change_category,
+                    priority=change_priority,
+                    expected_outcome=change_outcome,
+                    context=context_payload,
+                )
+                if ok:
+                    append_runtime_event(
+                        level="INFO",
+                        event="change_request_submitted",
+                        message="User submitted enhancement change request.",
+                        context={
+                            "request_id": request_id,
+                            "category": change_category,
+                            "priority": change_priority,
+                            "title": change_title.strip(),
+                        },
+                    )
+                    st.success(f"Submitted as `{request_id}`.")
+                else:
+                    append_runtime_event(
+                        level="WARNING",
+                        event="change_request_submit_failed",
+                        message=message,
+                        context={"title": change_title.strip(), "category": change_category},
+                    )
+                    st.error(message)
+
+        recent_requests = read_change_requests(limit=5)
+        if recent_requests:
+            st.caption("Recent requests")
+            recent_df = pd.DataFrame(recent_requests)
+            preview_cols = [c for c in ["request_id", "timestamp_utc", "category", "priority", "title", "status"] if c in recent_df.columns]
+            st.dataframe(_format_dataframe_for_display(recent_df[preview_cols]), width="stretch", hide_index=True)
+        st.caption(f"Log file: `{change_request_log_path()}`")
+
 _display_help_panel()
 
 summary_tab, cashflow_tab, drivers_tab, sens_tab = st.tabs(
@@ -4219,11 +4732,21 @@ with summary_tab:
     c5.metric("Negative Cash Months", f"{metrics_range['negative_cash_months']}", f"Full {metrics_full['negative_cash_months']}")
     c6.metric("Avg Gross Margin", f"{100 * metrics_range['gross_margin_full_period_avg']:.1f}%")
 
-    d1, d2, d3, d4 = st.columns(4)
+    d1, d2, d3, d4, d5, d6 = st.columns(6)
     d1.metric("Cash Conversion Cycle", f"{metrics_range['ccc']:.1f} days")
     d2.metric("CAC", f"${metrics_range['cac']:,.2f}")
     d3.metric("Break-even Revenue", f"${metrics_range['break_even_revenue']:,.0f}")
-    d4.metric("Total Disbursements", f"${metrics_range['total_disbursements']:,.0f}")
+    d4.metric(
+        "Break-even Labor Rate",
+        f"${metrics_range['break_even_labor_rate_per_tech_hour']:,.2f}/hr",
+        f"Full ${metrics_full['break_even_labor_rate_per_tech_hour']:,.2f}/hr",
+    )
+    d5.metric(
+        "Break-even Wage Rate",
+        f"${metrics_range['break_even_wage_rate_per_hour']:,.2f}/hr",
+        f"Full ${metrics_full['break_even_wage_rate_per_hour']:,.2f}/hr",
+    )
+    d6.metric("Total Disbursements", f"${metrics_range['total_disbursements']:,.0f}")
 
     st.caption("Annual KPIs for selected range")
     st.dataframe(_format_dataframe_for_display(annual_kpis_range), width="stretch")
@@ -4547,9 +5070,58 @@ with sens_tab:
 
     sens_df = st.session_state.get("sensitivity_result_df", pd.DataFrame())
     target_year = st.session_state.get("sensitivity_result_year", 1)
-    target = st.selectbox("Target metric", TARGET_OPTIONS, index=TARGET_OPTIONS.index("Year N EBITDA"))
+    if st.session_state.get("sensitivity_target_metric") not in TARGET_OPTIONS:
+        st.session_state["sensitivity_target_metric"] = "Year N EBITDA"
+    st.selectbox("Target metric", TARGET_OPTIONS, key="sensitivity_target_metric")
+    target = st.session_state["sensitivity_target_metric"]
     if len(sens_df) > 0:
-        tornado = sens_df.pivot(index="Driver", columns="Case", values=f"Delta {target}").fillna(0)
+        delta_target_col = f"Delta {target}"
+        if delta_target_col not in sens_df.columns and st.session_state.get("sensitivity_drivers"):
+            append_runtime_event(
+                level="INFO",
+                event="sensitivity_target_column_missing",
+                message="Selected sensitivity target column not found; refreshing sensitivity output.",
+                context={
+                    "target_metric": target,
+                    "missing_column": delta_target_col,
+                    "available_columns": sens_df.columns.tolist(),
+                },
+            )
+            sens_df, target_year = _run_sensitivity_cached(
+                sensitivity_signature[0],
+                sensitivity_signature[1],
+                sensitivity_signature[2],
+            )
+            st.session_state["sensitivity_result_df"] = sens_df
+            st.session_state["sensitivity_result_year"] = target_year
+            st.session_state["sensitivity_result_signature"] = sensitivity_signature
+            delta_target_col = f"Delta {target}"
+
+        if delta_target_col not in sens_df.columns:
+            available_targets = [t for t in TARGET_OPTIONS if f"Delta {t}" in sens_df.columns]
+            if available_targets:
+                fallback_target = available_targets[0]
+                st.warning(
+                    f"Sensitivity results do not include `{target}` yet. "
+                    f"Showing `{fallback_target}` instead."
+                )
+                target = fallback_target
+                delta_target_col = f"Delta {target}"
+            else:
+                append_runtime_event(
+                    level="ERROR",
+                    event="sensitivity_no_delta_columns",
+                    message="Sensitivity output is missing all expected delta target columns.",
+                    context={"columns": sens_df.columns.tolist()},
+                )
+                st.error(
+                    "Sensitivity results are missing target delta columns. "
+                    "Adjust drivers and click Run / Refresh Sensitivity."
+                )
+                sens_df = pd.DataFrame()
+
+    if len(sens_df) > 0:
+        tornado = sens_df.pivot(index="Driver", columns="Case", values=delta_target_col).fillna(0)
         tornado["Base"] = 0
         tdf = tornado[["Low", "Base", "High"]].reset_index().melt(id_vars="Driver", var_name="Case", value_name="Delta")
         st.plotly_chart(
