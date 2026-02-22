@@ -438,7 +438,8 @@ def run_model(raw_inputs: Dict) -> pd.DataFrame:
     repl_equipment = repl_rev * i.repl_equipment_pct * cost_mult
     permits = repl_jobs * i.permit_cost_per_repl_job * cost_mult
     disposal = repl_jobs * i.disposal_cost_per_repl_job * cost_mult
-    direct_labor = tech_hours * i.tech_wage_per_hour * (1 + i.payroll_burden_pct) * cost_mult * tech_raise
+    tech_labor_cost_per_wage_unit = tech_hours * (1 + i.payroll_burden_pct) * cost_mult * tech_raise
+    direct_labor = tech_labor_cost_per_wage_unit * i.tech_wage_per_hour
 
     total_direct_costs = (
         service_materials
@@ -697,6 +698,7 @@ def run_model(raw_inputs: Dict) -> pd.DataFrame:
             "Replacement Equipment": repl_equipment,
             "Permits": permits,
             "Disposal": disposal,
+            "Tech Labor Cost per Wage Unit": tech_labor_cost_per_wage_unit,
             "Direct Labor": direct_labor,
             "Res Maintenance Direct Cost": res_maint_direct_cost,
             "LC Maintenance Direct Cost": lc_maint_direct_cost,

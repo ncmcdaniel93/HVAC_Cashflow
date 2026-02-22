@@ -37,3 +37,10 @@ def test_parse_import_json_supports_legacy_dict():
     assert len(unknown) == 0
     assert any("legacy" in w.lower() for w in warnings)
 
+
+def test_configure_storage_root_updates_store_paths(tmp_path):
+    root = persistence.configure_storage_root(tmp_path / "custom_store")
+    assert root == tmp_path / "custom_store"
+    assert persistence.STORE_DIR == tmp_path / "custom_store"
+    assert persistence.SCENARIO_STORE_FILE == (tmp_path / "custom_store" / "scenarios.json")
+    assert persistence.WORKSPACE_STORE_FILE == (tmp_path / "custom_store" / "workspaces.json")

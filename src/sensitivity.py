@@ -6,6 +6,7 @@ from copy import deepcopy
 
 import pandas as pd
 
+from src.metrics import compute_metrics
 from src.model import run_model
 
 
@@ -31,6 +32,9 @@ TARGET_OPTIONS = [
     "Year N EBITDA",
     "Year N Free Cash Flow",
     "Minimum Ending Cash",
+    "Break-even Revenue",
+    "Break-even Labor Rate",
+    "Break-even Wage Rate",
     "Total Revenue",
     "Total Disbursements",
 ]
@@ -73,12 +77,16 @@ def _year_value(df: pd.DataFrame, year: int, col: str) -> float:
 
 
 def evaluate_outputs(df: pd.DataFrame, target_year: int) -> dict:
+    metrics = compute_metrics(df, len(df))
     return {
         "Year 1 EBITDA": _year_value(df, 1, "EBITDA"),
         "Year 1 Free Cash Flow": _year_value(df, 1, "Free Cash Flow"),
         "Year N EBITDA": _year_value(df, target_year, "EBITDA"),
         "Year N Free Cash Flow": _year_value(df, target_year, "Free Cash Flow"),
         "Minimum Ending Cash": float(df["End Cash"].min()),
+        "Break-even Revenue": float(metrics["break_even_revenue"]),
+        "Break-even Labor Rate": float(metrics["break_even_labor_rate_per_tech_hour"]),
+        "Break-even Wage Rate": float(metrics["break_even_wage_rate_per_hour"]),
         "Total Revenue": float(df["Total Revenue"].sum()),
         "Total Disbursements": float(df["Total Disbursements"].sum()) if "Total Disbursements" in df.columns else 0.0,
     }

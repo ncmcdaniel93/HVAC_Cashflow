@@ -18,6 +18,10 @@ Write-Host "Using Python: $PythonExe"
     --collect-all streamlit `
     --collect-all plotly `
     --collect-all altair `
+    --collect-all reportlab `
+    --collect-all kaleido `
+    --collect-all openpyxl `
+    --collect-all xlsxwriter `
     --add-data "app.py;." `
     --add-data "src;src" `
     launcher.py

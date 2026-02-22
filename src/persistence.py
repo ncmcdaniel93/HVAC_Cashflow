@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,9 +15,41 @@ STORE_DIR = Path(".local_store")
 SCENARIO_STORE_FILE = STORE_DIR / "scenarios.json"
 WORKSPACE_STORE_FILE = STORE_DIR / "workspaces.json"
 
+_DEFAULT_STORE_DIR = Path(".local_store")
+_STORAGE_ENV_VAR = "HVAC_STORAGE_ROOT"
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _expand_storage_root(path_value: str | Path | None) -> Path:
+    if path_value is None:
+        return _DEFAULT_STORE_DIR
+    text = str(path_value).strip()
+    if not text:
+        return _DEFAULT_STORE_DIR
+    expanded = os.path.expandvars(os.path.expanduser(text))
+    return Path(expanded)
+
+
+def configure_storage_root(path_value: str | Path | None) -> Path:
+    """Configure storage root directory used for scenario/workspace persistence."""
+
+    global STORE_DIR, SCENARIO_STORE_FILE, WORKSPACE_STORE_FILE
+    root = _expand_storage_root(path_value)
+    STORE_DIR = root
+    SCENARIO_STORE_FILE = STORE_DIR / "scenarios.json"
+    WORKSPACE_STORE_FILE = STORE_DIR / "workspaces.json"
+    return STORE_DIR
+
+
+def storage_root_path() -> str:
+    return str(STORE_DIR.resolve())
+
+
+def storage_root_from_env() -> Path:
+    return _expand_storage_root(os.getenv(_STORAGE_ENV_VAR, ""))
 
 
 def _path_for(kind: str) -> Path:
@@ -101,3 +134,6 @@ def parse_import_json(raw_json: str) -> tuple[dict, dict | None, list[str], list
         return {}, None, ["Could not parse import JSON."], []
     assumptions, ui_state, warnings, unknown_keys = migrate_import_payload(payload)
     return assumptions, ui_state, warnings, unknown_keys
+
+
+configure_storage_root(storage_root_from_env())
